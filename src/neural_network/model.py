@@ -1,56 +1,75 @@
 import numpy as np
 
-def process_layer(x, W, B, activation):
-    z = x @ W + B
-    if activation == "relu":
-        return np.maximum(0, z), z
-    elif activation == "linear":
-        return z, z
+def activate(z, activation):
+        if activation == "relu":
+            return np.maximum(0, z)
+        elif activation == "gelu":
+            return 0.5 * z * (1 + np.tanh(np.sqrt(2/np.pi) * (z + 0.044715 * z**3)))
+        else:
+            return z
 
 def activation_derivative(z, activation):
     if activation == "relu":
         return (z > 0).astype(z.dtype)
-    elif activation == "linear":
+    elif activation == "gelu":
+        c = np.sqrt(2/np.pi)
+        t = np.tanh(c * (z + 0.044715 * z**3))
+        return 0.5 * (1 + t) + 0.5 * z * (1 - t**2) * c * (1 + 3 * 0.044715 * z**2)
+    else:
         return np.ones_like(z)
 
 def mse(pred, target):
-    return np.mean((pred - target) ** 2), 2 * (pred - target) / pred.size
+    return np.mean((pred - target) ** 2), 2 * (pred - target) / target.size
+
+class Layer:
+    def __init__(self, num_input, num_output, activation="linear"):
+        rng = np.random.default_rng()
+        self.W = rng.standard_normal((num_input, num_output)) * np.sqrt(2 / num_input)
+        self.b = np.zeros(num_output)
+        self.activation = activation
+        self.dW = np.zeros_like(self.W)
+        self.db = np.zeros_like(self.b)
+
+    def forward(self, x):
+        self.x = x
+        self.z = x @ self.W + self.b
+        return activate(self.z, self.activation)
+
+    def backward(self, da):
+        dz = da * activation_derivative(self.z, self.activation)
+        x2d = self.x.reshape(-1, self.x.shape[-1])
+        dz2d = dz.reshape(-1, dz.shape[-1])
+        self.dW = x2d.T @ dz2d
+        self.db = dz2d.sum(axis=0)
+        return dz @ self.W.T
+        
+
+        
+
 
 class Network:
-    def __init__(self, input_size, load_from=None):
+    def __init__(self, input_size):
         self.input_size = input_size
-        self.weight_list = []
-        self.bias_list = []
-        self.activation_list = []
-        self.inputs = []
-        self.z_vals = []
+        self.layers = []
 
-    def add_layer(self, num_output, activation):
-        rng = np.random.default_rng()
-        self.weight_list.append(rng.standard_normal((self.input_size, num_output)) * np.sqrt(2 / self.input_size))
-        self.bias_list.append(np.zeros((1, num_output)))
-        self.activation_list.append(activation)
+    def add_layer(self, num_output, activation="linear"):
+        self.layers.append(Layer(self.input_size, num_output, activation))
         self.input_size = num_output
 
     def forward(self, x):
-        self.inputs = []
-        self.z_vals = []
-        for i in range(len(self.weight_list)):
-            self.inputs.append(x)
-            x, z = process_layer(x, self.weight_list[i], self.bias_list[i], self.activation_list[i])
-            self.z_vals.append(z)
+        for layer in self.layers:
+            x = layer.forward(x)
         return x
 
-    def backward(self, da, lr=0.01):
-        for i in reversed(range(len(self.weight_list))):
-            dz = da * activation_derivative(self.z_vals[i], self.activation_list[i])
-            dW = self.inputs[i].T @ dz
-            db = dz.sum(axis=0, keepdims=True)
+    def backward(self, da):
+        for layer in reversed(self.layers):
+            da = layer.backward(da)
+        return da
 
-            da = dz @ self.weight_list[i].T
-
-            self.weight_list[i] -= lr * dW
-            self.bias_list[i]   -= lr * db
+    def step(self, lr):
+        for layer in self.layers:
+            layer.W -= lr * layer.dW
+            layer.b -= lr * layer.db
 
     def train(self, x_train, x_test, y_train, y_test, loss_fn="mse", epochs=100, lr=0.01, batch_size=None, shuffle=True, log_every=10):
         if batch_size is None:
@@ -69,7 +88,8 @@ class Network:
                 else:
                     print("Unknown loss function")
                     return 0
-                self.backward(grad, lr)
+                self.backward(grad)
+                self.step(lr)
                 epoch_loss += loss * len(batch)
             train_loss = epoch_loss / x_train.shape[0]
             if loss_fn == "mse":
