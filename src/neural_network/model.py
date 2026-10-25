@@ -50,6 +50,45 @@ LOSSES = {
     "cross_entropy": cross_entropy,
 }
 
+
+def build_transformer(*, input_type, out_dim, d_model=64, n_heads=4, n_layers=2, max_len=64, vocab_size=None, in_features=None, causal=True, output="per_position"):
+    if (input_type == "tokens"):
+        layers = [TokenPosEmbedding(vocab_size, max_len, d_model)]
+    else:
+        layers = [Dense(in_features, d_model, "linear"), PosEmbedding(max_len, d_model)]
+    layers += [TransformerBlock(d_model, n_heads, causal) for _ in range(n_layers)]
+    layers.append(LayerNorm(d_model))
+    if (output == "mean"):
+        layers.append(MeanPool())
+    elif output == "last":
+        layers.append(SelectToken(-1))
+    layers.append(Dense(d_model, out_dim, "linear"))
+    return Network(layers)
+
+
+class MeanPool:
+    def forward(self, x):
+        self.T = x.shape[1]
+        return x.mean(axis=1)
+
+    def backward(self, da):
+        return np.repeat(da[:, None, :], self.T, axis=1) / self.T
+
+
+class SelectToken:
+    def __init__(self, pos=-1):
+        self.pos = pos
+
+    def forward(self, x):
+        self.shape = x.shape
+        return x[:, self.pos] 
+
+    def backward(self, da):
+        dx = np.zeros(self.shape)
+        dx[:, self.pos] = da
+        return dx
+
+
 class Embedding:
     def __init__(self, num_embeddings, dim):
         rng = np.random.default_rng()
@@ -67,6 +106,22 @@ class Embedding:
 
     def params(self):
         return [(self.W, self.dW)]
+
+
+class PosEmbedding:
+    def __init__(self, max_len, dim):
+        self.pos = Embedding(max_len, dim)
+
+    def forward(self, x):
+        self.T = x.shape[1]
+        return x + self.pos.forward(np.arange(self.T))
+
+    def backward(self, da):
+        self.pos.backward(da.sum(axis=0))
+        return da
+
+    def params(self):
+        return self.pos.params()
 
 
 class TokenPosEmbedding:
@@ -97,7 +152,7 @@ def merge_heads(x):
 
 
 class MultiHeadAttention:
-    def __init__(self, d_model, n_heads):
+    def __init__(self, d_model, n_heads, causal=True):
         assert d_model % n_heads == 0
         self.H = n_heads
         self.dh = d_model // n_heads
@@ -105,6 +160,7 @@ class MultiHeadAttention:
         self.Wk = Dense(d_model, d_model, "linear")
         self.Wv = Dense(d_model, d_model, "linear")
         self.Wo = Dense(d_model, d_model, "linear")
+        self.causal = causal
 
     def forward(self, x):
         B, T, D = x.shape
@@ -113,8 +169,9 @@ class MultiHeadAttention:
         self.v = split_heads(self.Wv.forward(x), self.H)
 
         scores = self.q @ self.k.transpose(0, 1, 3, 2) / np.sqrt(self.dh)
-        mask = np.tril(np.ones((T, T), dtype=bool))
-        scores = np.where(mask, scores, -1e9)
+        if self.causal:
+            mask = np.tril(np.ones((T, T), dtype=bool))
+            scores = np.where(mask, scores, -1e9)
 
         self.attn = softmax(scores)
         out = merge_heads(self.attn @ self.v)
@@ -204,9 +261,9 @@ class Adam:
 
 
 class TransformerBlock:
-    def __init__(self, d_model, n_heads):
+    def __init__(self, d_model, n_heads, causal=True):
         self.ln1 = LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_heads)
+        self.attn = MultiHeadAttention(d_model, n_heads, causal)
         self.ln2 = LayerNorm(d_model)
         self.ffn = FeedForward(d_model)
 
@@ -303,21 +360,6 @@ class Network:
             if log_every and epoch % log_every == 0:
                 print(f"epoch {epoch}: train {train_loss:.4f}  test {test_loss:.4f}")
         return history
-
-    def grad_check(layer, x, eps=1e-5, n_checks=5):
-        rng = np.random.default_rng(0)
-        out = layer.forward(x)
-        w = rng.standard_normal(out.shape)      
-        layer.backward(w)                       
-        for p, g in layer.params():
-            g = g.copy()
-            for _ in range(n_checks):
-                i = tuple(rng.integers(0, s) for s in p.shape)
-                old = p[i]
-                p[i] = old + eps; lp = (layer.forward(x) * w).sum()
-                p[i] = old - eps; lm = (layer.forward(x) * w).sum()
-                p[i] = old
-                print(f"{(lp - lm) / (2 * eps):+.6f}  {g[i]:+.6f}")
 
     def params(self):
         return [p for layer in self.layers for p in layer.params()]       
