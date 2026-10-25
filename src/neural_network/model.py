@@ -21,6 +21,25 @@ def activation_derivative(z, activation):
 def mse(pred, target):
     return np.mean((pred - target) ** 2), 2 * (pred - target) / target.size
 
+class Adam:
+    def __init__(self, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8):
+        self.lr, self.beta1, self.beta2, self.eps = lr, beta1, beta2, eps
+        self.t = 0
+        self.m = None
+        self.v = None
+
+    def step(self, params):
+        if self.m is None: 
+            self.m = [np.zeros_like(p) for p, _ in params]
+            self.v = [np.zeros_like(p) for p, _ in params]
+        self.t += 1
+        for i, (p, g) in enumerate(params):
+            self.m[i] = self.beta1 * self.m[i] + (1 - self.beta1) * g
+            self.v[i] = self.beta2 * self.v[i] + (1 - self.beta2) * g**2
+            m_hat = self.m[i] / (1 - self.beta1**self.t)   
+            v_hat = self.v[i] / (1 - self.beta2**self.t)
+            p -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+
 class Layer:
     def __init__(self, num_input, num_output, activation="linear"):
         rng = np.random.default_rng()
@@ -42,7 +61,9 @@ class Layer:
         self.dW = x2d.T @ dz2d
         self.db = dz2d.sum(axis=0)
         return dz @ self.W.T
-        
+
+    def params(self):
+        return [(self.W, self.dW), (self.b, self.db)]
 
         
 
@@ -66,16 +87,12 @@ class Network:
             da = layer.backward(da)
         return da
 
-    def step(self, lr):
-        for layer in self.layers:
-            layer.W -= lr * layer.dW
-            layer.b -= lr * layer.db
-
     def train(self, x_train, x_test, y_train, y_test, loss_fn="mse", epochs=100, lr=0.01, batch_size=None, shuffle=True, log_every=10):
         if batch_size is None:
             batch_size = x_train.shape[0]
         rng = np.random.default_rng()
         history = {"train_loss": [], "test_loss": []}
+        optimizer = Adam(lr=lr)
         for epoch in range(epochs):
             idx = rng.permutation(x_train.shape[0]) if shuffle else np.arange(x_train.shape[0])
             epoch_loss = 0.0
@@ -89,7 +106,7 @@ class Network:
                     print("Unknown loss function")
                     return 0
                 self.backward(grad)
-                self.step(lr)
+                optimizer.step(self.params())
                 epoch_loss += loss * len(batch)
             train_loss = epoch_loss / x_train.shape[0]
             if loss_fn == "mse":
@@ -103,6 +120,7 @@ class Network:
                 print(f"epoch {epoch}: train {train_loss:.4f}  test {test_loss:.4f}")
         return history
 
-                
+    def params(self):
+        return [p for layer in self.layers for p in layer.params()]       
 
     
